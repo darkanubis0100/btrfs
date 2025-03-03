@@ -51,6 +51,7 @@ my %logroots = ();
 my @l2p = ();
 my @l2p_bs = ();
 my $csum_type;
+my @remaps = ();
 
 read_superblock($f);
 
@@ -996,7 +997,7 @@ sub dump_item {
 }
 
 sub read_data {
-    my ($addr, $size, $bs) = @_;
+    my ($addr, $size, $bs, $ignore_remap) = @_;
     my (@arr, $f, $data, $stripeoff, $parity, $stripe, $physstripe, $physoff);
 
     if ($bs == 1) {
@@ -1007,6 +1008,23 @@ sub read_data {
 
     foreach my $obj (@arr) {
         if ($obj->{'offset'} <= $addr && ($addr - $obj->{'offset'}) < $obj->{'size'}) {
+            if ($ignore_remap != 1 && $obj->{'type'} & 0x800) { # remapped
+                my $new_addr = 0;
+
+                foreach my $a (@remaps) {
+                    if ($addr >= $a->{'old_addr'} && $addr < $a->{'old_addr'} + $a->{'length'}) {
+                        $new_addr = $addr - $a->{'old_addr'} + $a->{'new_addr'};
+                        last;
+                    }
+                }
+
+                if ($new_addr == 0) {
+                    die sprintf("Unable to translate remapped address %x\n", $addr);
+                } elsif ($new_addr != $addr) {
+                    return read_data($new_addr, $size, $bs, 1);
+                }
+            }
+
             if ($obj->{'type'} & 0x80) { # RAID5
                 $stripeoff = ($addr - $obj->{'offset'}) % 0x20000;
                 $parity = (int(($addr - $obj->{'offset'}) / 0x20000) + 2) % 3;
@@ -1203,6 +1221,14 @@ sub dump_tree {
                 push @l2p, \%obj;
 
                 #print Dumper(@l2p);
+            }
+
+            if ($treenum == 13) {
+                if ($ihb[1] == 0xea) { # IDENTITY_REMAP
+                    push @remaps, { 'new_addr' => $ihb[0], 'old_addr' => $ihb[0], 'length' => $ihb[2] };
+                } elsif ($ihb[1] == 0xeb) { # REMAP
+                    push @remaps, { 'new_addr' => unpack("Q", $item), 'old_addr' => $ihb[0], 'length' => $ihb[2] };
+                }
             }
 
             if ($ihb[1] == 0x84) {
